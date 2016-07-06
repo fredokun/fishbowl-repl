@@ -46,6 +46,8 @@ To try cl-jupyter you need :
  - Python 3.x (cf. http://www.python.org)
 
  - Jupyter (a.k.a. IPython 4.x) or IPython 3.x (cf. http://www.jupyter.org)
+ 
+ - zeromq 4 (here is how to install it: https://gist.github.com/cdjhlee/b8e3c927a01b0948b42d)
 
 ## Quick install ##
 
