@@ -40,6 +40,8 @@ To try cl-jupyter you need :
    - or Clozure CL 1.10 or above (with native threads enabled) ...
 
    - ECL is planned, for other implementations please fill an issue.
+ 
+ - ZeroMQ (cf. http://zeromq.org) On macOS: 'brew install zeromq'
 
  - Quicklisp (cf. http://www.quicklisp.org)
 
