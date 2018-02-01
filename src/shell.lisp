@@ -26,6 +26,7 @@
           shell)))))
 
 (defun shell-loop (shell)
+  "Main kernel loop, which waits for messages from the notebook"
   (let ((active t))
     (format t "[Shell] loop started~%")
     (send-status-starting (kernel-iopub (shell-kernel shell)) (kernel-session (shell-kernel shell)) :key (kernel-key shell))
@@ -43,6 +44,10 @@
 		       (handle-kernel-info-request shell identities msg buffers))
 		      ((equal msg-type "execute_request")
 		       (setf active (handle-execute-request shell identities msg buffers)))
+                      ((equal msg-type "inspect_request")
+                       (handle-inspect-request shell identities msg buffers))
+                      ((equal msg-type "complete_request")
+                       (handle-complete-request shell identities msg buffers))
 		      (t (warn "[Shell] message type '~A' not (yet ?) supported, skipping..." msg-type))))))))
 
 
@@ -186,6 +191,151 @@
 				     ("payload" . ,(vector))))))
 	  (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
 	  t)))))
+
+#|
+
+### Message type: inspect_request ###
+
+|#
+
+(defun get-token (code pos &optional (levels 1))
+  "Find a token to look up, based on code string and position.
+  
+  Look backwards to find the opening brace, then read the first token.
+  For a function/macro expression this should be a symbol.
+
+  LEVELS contains the number of opening parentheses to stop at.
+  If this is 1 then the innermost form is searched, 2 finds the parent form etc.
+
+  Returns nil as first value if nothing found or an error occurred
+  "
+  (when (zerop (length code))
+    (return-from get-token (values nil 0)))
+  
+  (let ((start-paren (let ((start-pos (if (char= (char code pos) #\)) ; Ignore ')' at point
+                                          (1- pos)
+                                          pos))
+                           (paren-count levels)) ; Keep track of the number of parentheses
+                       ;; Note: This will get confused by literal parentheses in the source code
+                       (loop for i from start-pos downto 0 do ; Search backwards through the string
+                            (case (char code i)
+                              (#\( (when (zerop (decf paren-count)) ; Decrement parenthesis count
+                                     (return i)))  ; Found beginning of this form, so return index
+                              (#\) (incf paren-count))
+                              (otherwise nil))
+                          finally (return-from get-token (values nil 0))))))  ; Not found
+    
+    ;; Read from the string, starting at (start-paren + 1)
+    ;; Don't error, just return nil
+    (ignore-errors (read-from-string code nil nil :start (1+ start-paren)))))
+
+(example (get-token "" 0) => (values nil 0))
+(example (get-token "(" 0) => (values nil 1))
+(example (get-token "(test" 0) => (values 'test 5))
+(example (get-token "(  test" 5) => (values 'test 7))
+; Ignore nested forms before position
+(example (get-token "( *test-sym (answer 42) here" 25) => '*test-sym)
+; This next example triggers a read error condition
+(example (get-token "(let ()" 6) => nil)
+
+(defun get-token-search (code pos &optional (levels 2))
+  "Searches for a token using get-token, starting in the innermost form 
+   and going outwards up to LEVELS"
+  (loop for level from 1 to levels do
+       (let ((token (get-token code pos level)))
+         (if token (return-from get-token-search token))))
+  nil) ; Not found
+
+(example (get-token-search "(  test" 5) => 'test)
+(example (get-token-search "(let ()" 6) => 'let)
+
+(defun handle-inspect-request (shell identities msg buffers)
+  "Inspection request. Processes a inspect_request message in MSG,
+   calling message-send with an inspect_reply type message."
+  (format t "[Shell] handling 'inspect_request'~%")
+  (let ((content (parse-json-from-string (message-content msg))))
+    (format t "  ==> Message content = ~W~%" content)
+    (let ((code (afetch "code" content :test #'equal))
+          (cursor-pos (afetch "cursor_pos" content :test #'equal))
+          (detail-level (afetch "detail_level" content :test #'equal)))
+
+      ;;(format t "  ===> Code to inspect = ~W~%" code)
+        
+      (let ((reply (let ((text (let ((token (get-token-search code cursor-pos)))
+                                 (if (and token (symbolp token))
+                                     ;; Get output of describe into a string
+                                     (let ((str (make-string-output-stream)))
+                                       (describe token str)
+                                       (get-output-stream-string str))))))
+                     
+                     ;; Here text is either nil or a description
+                     ;;(format t "  ===> Description = ~W~%" text)
+                     
+                     (if text
+                         (make-message msg "inspect_reply" nil
+                                       `(("status" . "ok")
+                                         ("found" . :true)
+                                         ("data" . (("text/plain" . ,text)
+                                                    ("dummy" . "none"))))) ; Note: needed for some reason. JSON map encoding?
+                         ;; No text
+                         (make-message msg "inspect_reply" nil
+                                       `(("status" . "ok")
+                                         ("found" . :false)))))))
+        
+        (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
+        t))))
+
+#|
+
+### Message type: complete_request ###
+
+|#
+
+(defun symbol-start-before-cursor (code pos)
+  "Return the starting position of the symbol which ends
+   in the string CODE at position POS"
+  (loop for i from (1- pos) downto 0 do
+       (let ((ch (char code i)))
+         (if (or (char= ch #\Space)
+                 (char= ch #\Newline)
+                 (char= ch #\Tab)
+                 (char= ch #\()
+                 (char= ch #\)))
+             ;; Start of the symbol. Symbol goes from character i+1 to pos (non-inclusive)
+             (return-from symbol-start-before-cursor (1+ i)))))
+  0)
+
+(example (symbol-start-before-cursor "test" 3) => 0)
+(example (symbol-start-before-cursor "(another thing" 8) => 1)
+(example (symbol-start-before-cursor "(another thing" 14) => 9)
+
+(defun handle-complete-request (shell identities msg buffers)
+  "Processes a complete_request message in MSG,
+   calling message-send with a complete_reply type message."
+  (format t "[Shell] handling 'complete_request'~%")
+  (let ((content (parse-json-from-string (message-content msg))))
+
+    (format t "  ==> Message content = ~W~%" content)
+    
+    (let* ((code (afetch "code" content :test #'equal))
+           (cursor-pos (afetch "cursor_pos" content :test #'equal))
+           (sym-start (symbol-start-before-cursor code cursor-pos))
+           (prefix (subseq code sym-start cursor-pos)))
+      
+      (when (string= "" prefix)
+        (return-from handle-complete-request nil)) ; No prefix to match
+      
+      ;; Find all completions, then sort by length with the shortest first
+      (let* ((matches (sort (cl-jupyter-swank:all-completions prefix *package*)
+                            #'< :key #'length))
+             
+             (reply (make-message msg "complete_reply" nil
+                                  `(("status" . "ok")
+                                    ("matches" . ,(apply #'vector matches)) ; Convert to vector so converted to JSON array
+                                    ("cursor_start" . ,sym-start)
+                                    ("cursor_end" . ,cursor-pos)))))
+        
+        (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))))))
 
 #|
      

@@ -24,6 +24,11 @@
 	   #:encode-json
 	   #:encode-json-to-string))
 
+(defpackage #:cl-jupyter-swank
+  (:use #:cl)
+  (:export #:simple-completions
+	   #:all-completions))
+
 (defpackage #:cl-jupyter
   (:use #:cl #:fredo-utils #:myjson)
   (:export 
