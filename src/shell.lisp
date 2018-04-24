@@ -46,6 +46,8 @@
 		       (setf active (handle-execute-request shell identities msg buffers)))
                       ((equal msg-type "inspect_request")
                        (handle-inspect-request shell identities msg buffers))
+                      ((equal msg-type "complete_request")
+                       (handle-complete-request shell identities msg buffers))
 		      (t (warn "[Shell] message type '~A' not (yet ?) supported, skipping..." msg-type))))))))
 
 
@@ -283,7 +285,57 @@
         (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
         t))))
 
+#|
 
+### Message type: complete_request ###
+
+|#
+
+(defun symbol-start-before-cursor (code pos)
+  "Return the starting position of the symbol which ends
+   in the string CODE at position POS"
+  (loop for i from (1- pos) downto 0 do
+       (let ((ch (char code i)))
+         (if (or (char= ch #\Space)
+                 (char= ch #\Newline)
+                 (char= ch #\Tab)
+                 (char= ch #\()
+                 (char= ch #\)))
+             ;; Start of the symbol. Symbol goes from character i+1 to pos (non-inclusive)
+             (return-from symbol-start-before-cursor (1+ i)))))
+  0)
+
+(example (symbol-start-before-cursor "test" 3) => 0)
+(example (symbol-start-before-cursor "(another thing" 8) => 1)
+(example (symbol-start-before-cursor "(another thing" 14) => 9)
+
+(defun handle-complete-request (shell identities msg buffers)
+  "Processes a complete_request message in MSG,
+   calling message-send with a complete_reply type message."
+  (format t "[Shell] handling 'complete_request'~%")
+  (let ((content (parse-json-from-string (message-content msg))))
+
+    (format t "  ==> Message content = ~W~%" content)
+    
+    (let* ((code (afetch "code" content :test #'equal))
+           (cursor-pos (afetch "cursor_pos" content :test #'equal))
+           (sym-start (symbol-start-before-cursor code cursor-pos))
+           (prefix (subseq code sym-start cursor-pos)))
+      
+      (when (string= "" prefix)
+        (return-from handle-complete-request nil)) ; No prefix to match
+      
+      ;; Find all completions, then sort by length with the shortest first
+      (let* ((matches (sort (cl-jupyter-swank:all-completions prefix *package*)
+                            #'< :key #'length))
+             
+             (reply (make-message msg "complete_reply" nil
+                                  `(("status" . "ok")
+                                    ("matches" . ,(apply #'vector matches)) ; Convert to vector so converted to JSON array
+                                    ("cursor_start" . ,sym-start)
+                                    ("cursor_end" . ,cursor-pos)))))
+        
+        (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))))))
 
 #|
      
