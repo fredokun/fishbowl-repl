@@ -132,7 +132,6 @@ Lisp printer. In most cases this is enough but specializations are
   ;; no rendering by default
   nil)
 
-
 #|
 
  ## Display methods ##

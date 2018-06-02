@@ -6,6 +6,34 @@
 
 |#
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; These variables are always bound when a cell is evaluated
+;;; They define a dynamic environment within which SEND operates
+(defvar *parent-msg* nil)
+(defvar *shell* nil)
+(defvar *kernel* nil)
+(defvar *default-special-bindings*)
+(defvar *special-variables* '(*parent-msg* *shell* *kernel*))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;
+;;; These variables are to allow cl-jupyter-widgets to extend
+;;; the cl-jupyter message handler.
+
+(defparameter *kernel-start-hook* nil)
+(defparameter *kernel-shutdown-hook* nil)
+(defparameter *sort-encoded-json* nil)
+(defparameter *handle-comm-open-hook* nil)
+(defparameter *handle-comm-msg-hook* nil)
+(defparameter *handle-comm-close-hook* nil)
+(defparameter *cl-jupyter-widget-display-hook* nil
+  "A function with the form (display-hook result-widget iopub msg execution-count key).
+If the display hook function recognizes result-widget as a widget it displays it and
+returns T. If it doesn't recognize it as a widget then simply return NIL and shell will
+display the result.")
+
 (defclass shell-channel ()
   ((kernel :initarg :kernel :reader shell-kernel)
    (socket :initarg :socket :initform nil :accessor shell-socket)))
@@ -25,25 +53,54 @@
           (pzmq:bind socket endpoint)
           shell)))))
 
-(defun shell-loop (shell)
-  (let ((active t))
-    (format t "[Shell] loop started~%")
-    (send-status-starting (kernel-iopub (shell-kernel shell)) (kernel-session (shell-kernel shell)) :key (kernel-key shell))
-    (while active
-      (vbinds (identities sig msg buffers)  (message-recv (shell-socket shell))
-	      ;;(format t "Shell Received:~%")
-	      ;;(format t "  | identities: ~A~%" identities)
-	      ;;(format t "  | signature: ~W~%" sig)
-	      ;;(format t "  | message: ~A~%" (encode-json-to-string (message-header msg)))
-	      ;;(format t "  | buffers: ~W~%" buffers)
+(defparameter *session-receive-lock* (bordeaux-threads:make-lock "session-receive-lock"))
 
-	      ;; TODO: check the signature (after that, sig can be forgotten)
-	      (let ((msg-type (header-msg-type (message-header msg))))
-		(cond ((equal msg-type "kernel_info_request")
-		       (handle-kernel-info-request shell identities msg buffers))
-		      ((equal msg-type "execute_request")
-		       (setf active (handle-execute-request shell identities msg buffers)))
-		      (t (warn "[Shell] message type '~A' not (yet ?) supported, skipping..." msg-type))))))))
+(defun shell-loop (shell)
+  (unwind-protect
+       (progn
+         (bordeaux-threads:acquire-lock *session-receive-lock*)
+         (let ((active t))
+           (format t "[Shell] loop started~%")
+           (send-status-starting (kernel-iopub (shell-kernel shell)) (kernel-session (shell-kernel shell)) :key (kernel-key shell))
+           (format t "[Shell] entering main loop~%")
+           (while active
+                  (logg 1 "[Shell] top of main loop~%")
+                  (vbinds (identities sig msg)  (message-recv (shell-socket shell))
+                          (logg 1 "[Shell] Received message ~s~%" msg)
+                          (progn
+                            (logg 2 "Shell Received message:~%")
+                            (logg 2 "  | identities: ~A~%" identities)
+                            (logg 2 "  | signature: ~W~%" sig)
+                            (logg 2 "  | message: ~A~%" (encode-json-to-string (message-header msg)))
+                            (logg 2 "  | number of buffers: ~W~%" (length (message-buffers msg))))
+                          ;; TODO: check the signature (after that, sig can be forgotten)
+                          (let* ((msg-type (header-msg-type (message-header msg))))
+                            (let ((*parent-msg* msg)
+                                  (*shell* shell)
+                                  (*kernel* (shell-kernel shell)))
+                              (let ((*default-special-bindings* (list (cons '*parent-msg* *parent-msg*)
+                                                                      (cons '*shell* *shell*)
+                                                                      (cons '*kernel* *kernel*))))
+                                (logg 2 "  |  *parent-msg* -> ~s~%" *parent-msg*)
+                                (cond ((equal msg-type "kernel_info_request")
+                                       (handle-kernel-info-request shell identities msg))
+                                      ((equal msg-type "execute_request")
+                                       (setf active (handle-execute-request shell identities msg)))
+                                      ((equal msg-type "comm_open")
+                                       (when cl-jupyter:*handle-comm-open-hook*
+                                         (funcall cl-jupyter:*handle-comm-open-hook* shell identities msg)))
+                                      ((equal msg-type "comm_msg")
+                                       (when cl-jupyter:*handle-comm-msg-hook*
+                                         (funcall cl-jupyter:*handle-comm-msg-hook* shell identities msg)))
+                                      ((equal msg-type "comm_close")
+                                       (when cl-jupyter:*handle-comm-close-hook*
+                                         (funcall cl-jupyter:*handle-comm-close-hook* shell identities msg)))
+                                      ((equal msg-type "complete_request")
+                                       (complete-request shell identities msg))
+                                      ((equal msg-type "inspect_request")
+                                       (inspect-request shell identities msg))
+                                      (t (warn "[Shell] message type '~A' not (yet ?) supported, skipping... msg: ~s" msg-type msg))))))))))
+    (bordeaux-threads:release-lock *session-receive-lock*)))
 
 
 #|
@@ -51,6 +108,86 @@
 ### Message type: kernel_info_reply ###
 
 |#
+
+
+(defun complete-request (shell identities msg)
+  "Handle complete_request.  This provides tab completion to cl-jupyter."
+  (let* ((json (parse-json-from-string (message-content msg)))
+         (text ([] json "code"))
+         (cursor-end ([] json "cursor_pos"))
+         (sep-pos (position-if (lambda (c) (or (char<= c #\space)
+                                               (char= c #\()
+                                               (char= c #\))
+                                               (char= c #\")
+                                               (char= c #\#)
+                                               (char= c #\')
+                                               (char= c #\`)))
+                               text
+                               :start 0
+                               :end cursor-end
+                               :from-end t))
+         (cursor-start (if sep-pos (1+ sep-pos) 0))
+         (partial-token (subseq text cursor-start cursor-end)))
+    (handler-case
+        (handler-bind
+            ((serious-condition
+               #'(lambda (err)
+                   (logg 2 "~a~%" (with-output-to-string (*standard-output*)
+                                    (format t "~a~%" err)))
+                   (logg 2 "~a~%" (fredo-utils:backtrace-as-string)))))
+          (multiple-value-bind (completions metadata)
+              (simple-completions partial-token *package* (char text sep-pos))        
+            (logg 2 "complete-request partial-token: ~a~%" partial-token)
+            (logg 2 "   --> completions: ~s~%" completions)
+            (logg 2 "   --> metadata: ~s~%" metadata)
+            (let* ((data `(("status" . "ok")
+                           ("metadata" . ,metadata)
+                           ("cursor_start" . ,cursor-start)
+                           ("cursor_end" . ,cursor-end)
+                           ("matches" . ,(make-array (length (car completions)) :initial-contents (car completions)))))
+                   (reply (make-message msg "complete_reply" nil data)))
+              (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell)))))
+      (simple-condition (err)
+        (format *error-output* "~&~A: ~%" (class-name (class-of err)))
+        (apply (function format) *error-output*
+               (simple-condition-format-control   err)
+               (simple-condition-format-arguments err))
+        (format *error-output* "~&"))
+      (serious-condition (err)
+        (format *error-output* "~&An error occurred of type: ~A: ~%  ~S~%"
+                (class-name (class-of err)) err)))))
+
+
+(defun inspect-request (shell identities msg)
+  "Handle inspect_request.  This provides Shift-Tab completion to cl-jupyter.
+This should be improved so that if the cursor is inside of a form it returns information
+on the function of the form.  Currently it provides information on the function associated
+with the symbol to the left of the cursor."
+  (let* ((json (parse-json-from-string (message-content msg)))
+         (text ([] json "code"))
+         (cursor-end ([] json "cursor_pos"))
+         (sep-pos (position-if (lambda (c) (or (char<= c #\space)
+                                               (char= c #\()
+                                               (char= c #\))
+                                               (char= c #\")
+                                               (char= c #\#)
+                                               (char= c #\')
+                                               (char= c #\`)))
+                               text
+                               :start 0
+                               :end cursor-end
+                               :from-end t))
+         (cursor-start (if sep-pos (1+ sep-pos) 0))
+         (partial-token (subseq text cursor-start cursor-end)))
+    (logg 2 "inspect_request partial-token: ~s~%" partial-token)
+    (let ((metadata nil)
+          (data (fulfil-inspect-request partial-token)))
+      (let* ((data `(("status" . "ok")
+                     ("found" . ,(if data :true :false))
+                     ("metadata" . ,metadata)
+                     ("data" . ,data)))
+             (reply (make-message msg "inspect_reply" nil data)))
+        (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))))))
 
 ;; for protocol version 5  
 (defclass content-kernel-info-reply (message-content)
@@ -105,7 +242,7 @@
 (defun kernel-key (shell)
   (kernel-config-key (kernel-config (shell-kernel shell))))
 
-(defun handle-kernel-info-request (shell identities msg buffers)
+(defun handle-kernel-info-request (shell identities msg)
   ;;(format t "[Shell] handling 'kernel-info-request'~%")
   ;; status to busy
   ;;(send-status-update (kernel-iopub (shell-kernel shell)) msg "busy" :key (kernel-key shell))
@@ -132,7 +269,7 @@
   ;;   				  'content-kernel-info-reply
   ;;   				  :protocol-version #(4 1)
   ;;   				  :language-version #(1 2 7)  ;; XXX: impl. dependent but really cares ?
-    ;;   				  :language "common-lisp"))))
+   ;;   				  :language "common-lisp"))))
     (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
     ;; status back to idle
     ;;(send-status-update (kernel-iopub (shell-kernel shell)) msg "idle" :key (kernel-key shell))
@@ -144,48 +281,56 @@
 
 |#
 
-
-(defun handle-execute-request (shell identities msg buffers)
-  ;;(format t "[Shell] handling 'execute_request'~%")
+(defun handle-execute-request (shell identities msg)
+  (logg 2 "[Shell] handling 'execute_request'~%")
   (send-status-update (kernel-iopub (shell-kernel shell)) msg "busy" :key (kernel-key shell))
   (let ((content (parse-json-from-string (message-content msg))))
-    ;;(format t "  ==> Message content = ~W~%" content)
+    (logg 2 "  ==> Message content = ~W~%" content)
     (let ((code (afetch "code" content :test #'equal)))
-      ;;(format t "  ===> Code to execute = ~W~%" code)
+      (logg 2 "  ===>    Code to execute = ~W~%" code)
       (vbinds (execution-count results stdout stderr)
-          (evaluate-code (kernel-evaluator (shell-kernel shell)) code)
-        ;(format t "Execution count = ~A~%" execution-count)
-        ;(format t "results = ~A~%" results)
-        ;(format t "STDOUT = ~A~%" stdout)
-        ;(format t "STDERR = ~A~%" stderr)
-        ;; broadcast the code to connected frontends
-        (send-execute-code (kernel-iopub (shell-kernel shell)) msg execution-count code :key (kernel-key shell))
-	(when (and (consp results) (typep (car results) 'cl-jupyter-user::cl-jupyter-quit-obj))
-	  ;; ----- ** request for shutdown ** -----
-	  (let ((reply (make-message msg "execute_reply" nil
-				     `(("status" . "abort")
-				       ("execution_count" . ,execution-count)))))
-	    (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell)))
-	  (return-from handle-execute-request nil))
-	;; ----- ** normal request ** -----
-        ;; send the stdout
-        (when (and stdout (> (length stdout) 0))
-          (send-stream (kernel-iopub (shell-kernel shell)) msg "stdout" stdout :key (kernel-key shell)))
-        ;; send the stderr
-        (when (and stderr (> (length stderr) 0))
-          (send-stream (kernel-iopub (shell-kernel shell)) msg "stderr" stderr :key (kernel-key shell)))
-	;; send the first result
-	(send-execute-result (kernel-iopub (shell-kernel shell)) 
-			     msg execution-count (car results) :key (kernel-key shell))
-	;; status back to idle
-	(send-status-update (kernel-iopub (shell-kernel shell)) msg "idle" :key (kernel-key shell))
-	;; send reply (control)
-	(let ((reply (make-message msg "execute_reply" nil
-				   `(("status" . "ok")
-				     ("execution_count" . ,execution-count)
-				     ("payload" . ,(vector))))))
-	  (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
-	  t)))))
+	      (progn
+		(logg 2 "Set cl-jupyter:*kernel* -> ~a ~%" cl-jupyter:*kernel*)
+		(evaluate-code (kernel-evaluator (shell-kernel shell)) code))
+	      (logg 2 "==> Execution count = ~A~%" execution-count)
+	      (logg 2 "==> results = ~S~%" results)
+	      (logg 2 "==> STDOUT = ~S~%" stdout)
+	      (logg 2 "==> STDERR = ~S~%" stderr)
+	      ;; broadcast the code to connected frontends
+	      (send-execute-code (kernel-iopub (shell-kernel shell)) msg execution-count code :key (kernel-key shell))
+	      (when (and (consp results) (typep (car results) 'cl-jupyter-user::cl-jupyter-quit-obj))
+		;; ----- ** request for shutdown ** -----
+		(let ((reply (make-message msg "execute_reply" nil
+					   `(("status" . "abort")
+					     ("execution_count" . ,execution-count)))))
+		  (message-send (shell-socket shell) reply :identities identities :key (kernel-key shell)))
+		(return-from handle-execute-request nil))
+	      ;; ----- ** normal request ** -----
+	      ;; send the stdout
+	      (when (and stdout (> (length stdout) 0))
+		(send-stream (kernel-iopub (shell-kernel shell)) msg "stdout" stdout :key (kernel-key shell)))
+	      ;; send the stderr
+	      (when (and stderr (> (length stderr) 0))
+		(send-stream (kernel-iopub (shell-kernel shell)) msg "stderr" stderr :key (kernel-key shell)))
+	      ;; send the first result
+              (logg 2 "==> About to display results -> ~s~%" results)
+              (cond
+                ((and *cl-jupyter-widget-display-hook*
+                      (funcall *cl-jupyter-widget-display-hook*
+                               (car results)
+                               (kernel-iopub (shell-kernel shell))
+                               msg execution-count (kernel-key shell))))
+                (t (send-execute-result (kernel-iopub (shell-kernel shell))
+				       msg execution-count (car results) :key (kernel-key shell))))
+	      ;; status back to idle
+	      (send-status-update (kernel-iopub (shell-kernel shell)) msg "idle" :key (kernel-key shell))
+	      ;; send reply (control)
+	      (let ((reply (make-message msg "execute_reply" nil
+					 `(("status" . "ok")
+					   ("execution_count" . ,execution-count)
+					   ("payload" . ,(vector))))))
+		(message-send (shell-socket shell) reply :identities identities :key (kernel-key shell))
+		t)))))
 
 #|
      
@@ -196,4 +341,3 @@
 (defclass message-content ()
   ()
   (:documentation "The base class of message contents."))
-

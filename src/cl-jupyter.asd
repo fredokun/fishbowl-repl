@@ -8,7 +8,8 @@
                :bordeaux-threads
                :uuid
                :babel
-               :ironclad
+               #+sbcl #:sb-introspect
+               #-clasp :ironclad
                :cl-base64)
   :serial t
   :components ((:file "packages")
@@ -17,6 +18,7 @@
                (:file "config")
                (:file "message")
                (:file "shell")
+               (:file "completion")
                (:file "iopub")
                (:file "display")
                (:file "evaluator")

@@ -57,19 +57,24 @@ The history of evaluations is also saved by the evaluator.
   `(handler-case
        (handler-bind
            ((simple-warning
-             #'(lambda (wrn)
-                 (format *error-output* "~&~A: ~%" (class-name (class-of wrn)))
-                 (apply (function format) *error-output*
-                        (simple-condition-format-control   wrn)
-                        (simple-condition-format-arguments wrn))
-                 (format *error-output* "~&")
-                 (muffle-warning)))
+              #'(lambda (wrn)
+                  (format *error-output* "~&~A: ~%" (class-name (class-of wrn)))
+                  (apply (function format) *error-output*
+                         (simple-condition-format-control   wrn)
+                         (simple-condition-format-arguments wrn))
+                  (format *error-output* "~&")
+                  (muffle-warning)))
             (warning
-             #'(lambda (wrn)
-                 (format *error-output* "~&~A: ~%  ~A~%"
-                         (class-name (class-of wrn)) wrn)
-                 (muffle-warning))))
-	 (progn ,@body))
+              #'(lambda (wrn)
+                  (format *error-output* "~&~A: ~%  ~A~%"
+                          (class-name (class-of wrn)) wrn)
+                  (muffle-warning)))
+            (serious-condition
+              #'(lambda (err)
+                  (logg 2 "~a~%" (with-output-to-string (*standard-output*)
+                                   (format t "~a~%" err)))
+                  (logg 2 "~a~%" (fredo-utils:backtrace-as-string)))))
+         (progn ,@body))
      (simple-condition (err)
        (format *error-output* "~&~A: ~%" (class-name (class-of err)))
        (apply (function format) *error-output*
@@ -77,15 +82,19 @@ The history of evaluations is also saved by the evaluator.
               (simple-condition-format-arguments err))
        (format *error-output* "~&"))
      (serious-condition (err)
-       (format *error-output* "~&~A: ~%  ~S~%"
+       (format *error-output* "~&An error occurred of type: ~A: ~%  ~S~%"
                (class-name (class-of err)) err))))
 
 (defun evaluate-code (evaluator code)
-  ;;(format t "[Evaluator] Code to evaluate: ~W~%" code)
+  ;; (format t "[Evaluator] Code to evaluate: ~W~%" code)
+  (logg 2 "[Evaluator] Code to evaluate: ~W  cl-jupyter::*kernel*->~a~%"
+                                  code cl-jupyter:*kernel*)
   (let ((execution-count (+ (length (evaluator-history-in evaluator)) 1)))
     (let ((code-to-eval (handler-case
                          (read-from-string (format nil "(progn ~A~%)" code))
-                         (END-OF-FILE (err) (list :read-error-eof (format nil "~A" (class-name (class-of err)))))
+                          (END-OF-FILE (err) (list :read-error-eof (format nil "~A" (class-name (class-of err)))))
+                          #+clasp(condition (err)
+                                   (list :read-error (format nil "~A (condition of type ~A)" err (class-name (class-of err)))))
                          #+sbcl (SB-INT:SIMPLE-READER-ERROR (err)
                                                             (list :read-error (format nil "~A (condition of type ~A)" err (class-name (class-of err))))))))
       ;;(format t "code-to-eval = ~A~%" code-to-eval)
@@ -117,8 +126,8 @@ The history of evaluations is also saved by the evaluator.
                                     (*error-output* stderr))
                                 (handling-errors
                                         ;(if (and (consp code-to-eval)
-                                        ;	(eql (car code-to-eval) 'quicklisp-client:quickload)
-                                        ;	(stringp (cadr code-to-eval)))
+                                        ;       (eql (car code-to-eval) 'quicklisp-client:quickload)
+                                        ;       (stringp (cadr code-to-eval)))
                                  ;; quicklisp hook
                                         ;  (multiple-value-list (ql:quickload (cadr code-to-eval)))
                                  ;; normal evaluation
@@ -126,12 +135,13 @@ The history of evaluations is also saved by the evaluator.
                                    (let ((* (take-history-out -1))
                                          (** (take-history-out -2))
                                          (*** (take-history-out -3)))
-                                   ;; put the evaluator in the environment
+                                     ;; put the evaluator in the environment
+                                     (logg 2 "In evaluator.lisp:133  cl-jupyter:*kernel* -> ~a~%" cl-jupyter:*kernel*)
                                      (multiple-value-list (eval code-to-eval))))))))))
              ;;(format t "[Evaluator] : results = ~W~%" results)
+             (logg 2 "[Evaluator] : results = ~W~%" results)
              (let ((in-code (format nil "~A" code-to-eval)))
                (vector-push-extend (subseq in-code 7 (1- (length in-code)))
                                    (evaluator-history-in evaluator)))
              (vector-push-extend results (evaluator-history-out evaluator))
              (values execution-count results stdout-str stderr-str))))))))
-

@@ -26,6 +26,8 @@ There are several libraries available for json encoding and decoding,
 
  - JSon null maps to :null
 
+Note:   Python None maps to NIL
+
 |#
 
 #|
@@ -248,7 +250,7 @@ There are several libraries available for json encoding and decoding,
 	      (char<= init #\9)) (parse-json-digits input))
 	(t
 	 (concatenate 'string 
-		      (format nil "~A" (parse-json-digit input :min #\1))
+		      (format nil "~A" (parse-json-digit input :min #\0))
 		      (parse-json-digits input)))))
 
 (example (with-input-from-string (s "132402")
@@ -364,6 +366,10 @@ The INDENT can be given for beautiful/debugging output (default is NIL
   (with-output-to-string (stream)
     (encode-json stream thing :indent indent)))
 
+(defun dumps (thing &rest args &key indent)
+  "A function that mimics  python json.dumps(whatever)."
+  (apply #'encode-json-to-string thing args))
+
 (defun gen-indent (level)
   (if level
       (make-string (* level *json-encoder-indent-level*) :initial-element #\Space)
@@ -417,6 +423,8 @@ with a new line")
 (defmethod encode-json (stream (thing cons) &key (indent nil) (first-line nil))
   (json-write stream (if first-line nil indent) (if indent t nil) "{")
   (let ((sepstr (if indent (format nil ",~%") ",")))
+    (when (and (boundp 'cl-jupyter::*sort-encoded-json*) cl-jupyter::*sort-encoded-json*)
+      (setf thing (sort (copy-list thing) #'string< :key #'car)))
     (loop 
        for (key . val) in thing
        for sep = "" then sepstr

@@ -22,12 +22,12 @@
   #+sbcl (cdr sb-ext:*posix-argv*)
   #+clozure CCL:*UNPROCESSED-COMMAND-LINE-ARGUMENTS*  ;(ccl::command-line-arguments)
   #+gcl si:*command-args*
-  #+ecl (loop for i from 0 below (si:argc) collect (si:argv i))
+  #+(or ecl clasp) (loop for i from 0 below (si:argc) collect (si:argv i))
   #+cmu extensions:*command-line-strings*
   #+allegro (sys:command-line-arguments)
   #+lispworks sys:*line-arguments-list*
   #+clisp ext:*args*
-  #-(or sbcl clozure gcl ecl cmu allegro lispworks clisp)
+  #-(or sbcl clozure gcl ecl clasp cmu allegro lispworks clisp)
   (error "get-argv not supported for your implementation"))
 
 (defun join (e l)
@@ -84,9 +84,9 @@
    (signature-scheme :initarg :signature-scheme :reader config-signature-scheme :type string)
    (key :initarg :key :reader kernel-config-key)))
 
-(defun kernel-start ()
+(defun kernel-start (&optional connection-file-name-arg)
   (let ((cmd-args (get-argv)))
-    ;(princ (banner))
+					;(princ (banner))
     (write-line "")
     (format t "~A: an enhanced interactive Common Lisp REPL~%" +KERNEL-IMPLEMENTATION-NAME+)
     (format t "(Version ~A - Jupyter protocol v.~A)~%"
@@ -94,8 +94,8 @@
             +KERNEL-PROTOCOL-VERSION+)
     (format t "--> (C) 2014-2015 Frederic Peschanski (cf. LICENSE)~%")
     (write-line "")
-    (let ((connection-file-name  (car (last cmd-args))))
-      ;; (format t "connection file = ~A~%" connection-file-name)
+    (let ((connection-file-name (or connection-file-name-arg  (car (last cmd-args)))))
+      (format t "connection file = ~A~%" connection-file-name)
       (unless (stringp connection-file-name)
         (error "Wrong connection file argument (expecting a string)"))
       (let ((config-alist (parse-json-from-string (concat-all 'string "" (read-file-lines connection-file-name)))))
@@ -121,6 +121,8 @@
                  (evaluator (make-evaluator kernel))
                  (shell (make-shell-channel kernel))
                  (iopub (make-iopub-channel kernel)))
+	    ;; Invoke the *kernel-start-hook* if available
+	    (when cl-jupyter:*kernel-start-hook* (funcall cl-jupyter:*kernel-start-hook* kernel))
 	    ;; Launch the hearbeat thread
 	    (let ((hb-socket (pzmq:socket (kernel-ctx kernel) :rep)))
 	      (let ((hb-endpoint (format nil "~A://~A:~A"
@@ -132,9 +134,11 @@
 		(let ((heartbeat-thread-id (start-heartbeat hb-socket)))
 		  ;; main loop
 		  (unwind-protect
-		       (progn (format t "[Kernel] Entering mainloop ...~%")
-			      (shell-loop shell))
+		       (progn
+			 (format t "[Kernel] Entering mainloop ...~%")
+			 (shell-loop shell))
 		    ;; clean up when exiting
+		    (when cl-jupyter:*kernel-shutdown-hook* (funcall cl-jupyter:*kernel-shutdown-hook* kernel))
 		    (bordeaux-threads:destroy-thread heartbeat-thread-id)
 		    (pzmq:close hb-socket)
 		    (pzmq:close (iopub-socket iopub))
@@ -146,7 +150,6 @@
   (format t "[Hearbeat] starting...~%")
   (let ((thread-id (bordeaux-threads:make-thread
 		    (lambda ()
-		      (format t "[Heartbeat] thread started~%")
 		      (pzmq:proxy socket socket (cffi:null-pointer))))))
 
     ;; XXX: without proxy

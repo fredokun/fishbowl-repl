@@ -1,0 +1,5 @@
+# For the widget-dev development environment we need
+#  to force eol=lf for Windows because the source files
+#  will be mounted and run within the docker container drmeister/cando
+#
+* text eol=lf

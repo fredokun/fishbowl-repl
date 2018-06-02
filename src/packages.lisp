@@ -1,8 +1,9 @@
-
 (defpackage #:fredokun-utilities
   (:nicknames #:fredo-utils)
   (:use #:cl)
-  (:export #:*example-enabled*
+  (:export #:[]
+           #:[]-contains
+           #:*example-enabled*
            #:*example-equal-predicate*
            #:example
            #:example-progn
@@ -15,6 +16,8 @@
 	   #:read-file-lines
 	   #:read-string-file
 	   #:read-binary-file
+           #:backtrace-as-string
+           #:function-lambda-list
 	   #:quit))
 
 (defpackage #:myjson
@@ -22,11 +25,13 @@
   (:export #:parse-json
 	   #:parse-json-from-string
 	   #:encode-json
-	   #:encode-json-to-string))
+	   #:encode-json-to-string
+           #:dumps))
 
 (defpackage #:cl-jupyter
   (:use #:cl #:fredo-utils #:myjson)
-  (:export 
+  (:export
+   #:send-execute-raw-display-object ; cl-jupyter-widgets uses this
    #:display
    #:display-plain render-plain
    #:display-html render-html
@@ -37,7 +42,26 @@
    #:display-svg render-svg
    #:display-json render-json
    #:display-javascript render-javascript
-   #:kernel-start))
+   #:message-header
+   #:message-content
+   #:message-buffers
+   #:message
+   #:*shell*
+   #:*kernel*
+   #:*parent-msg*
+   #:*default-special-bindings*
+   #:*special-variables*
+   #:kernel-start
+   #:[]
+   #:[]-contains
+   #:*kernel-start-hook*
+   #:*kernel-shutdown-hook*
+   #:*sort-encoded-json*
+   #:*handle-comm-open-hook*
+   #:*handle-comm-msg-hook*
+   #:*handle-comm-close-hook*
+   #:*cl-jupyter-widget-display-hook*
+   ))
 
 (defpackage #:cl-jupyter-user
   (:use #:cl #:fredo-utils #:cl-jupyter #:common-lisp-user)

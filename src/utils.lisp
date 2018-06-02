@@ -1,6 +1,37 @@
 
 (in-package #:fredokun-utilities)
 
+
+(declaim (inline []))
+(defun [] (table key &optional (default nil defaultp))
+  (let ((pair (assoc key table :test #'equal)))
+    (if pair
+        (cdr pair)
+        (if defaultp
+            default
+            (error "Could not find key ~a in dict ~a" key table)))))
+
+(defun []-contains (table key)
+  (let ((pair (assoc key table :test #'equal)))
+    pair))
+
+(defun getpid ()
+  "Return the pid of the current process"
+  #+clasp(core:getpid)
+  #+sbcl(sb-posix:getpid))
+
+
+(defun function-lambda-list (function)
+  "Return the lambda-list of a function - there is no standard way of doing this"
+  #+clasp(core:function-lambda-list function)
+  #+sbcl(sb-introspect:function-lambda-list function))
+
+
+(defun backtrace-as-string ()
+  "Returns the backtrace as a string for logging crashes"
+  #+clasp(with-output-to-string (*standard-output*) (core::clasp-backtrace))
+  #+sbcl "Generate a backtrace for sbcl")
+
 #|
 
 # CommonTypes: Utilities #
@@ -61,6 +92,47 @@
       `(progn ,@body)
       (values)))
 
+(defparameter *log-enabled* nil)
+(defparameter *log-level* nil)
+(defparameter *log-out-stream* nil)
+
+(defparameter *log-file* nil)
+(defparameter *log-lock* nil)
+
+;;; Comment out the following eval-when if you want logging fully disabled
+#+(or)
+(eval-when (:execute :load-toplevel :compile-toplevel)
+  (format t "Turning on cl-jupyter logging~%")
+  (push :cl-jupyter-log *features*))
+
+#+cl-jupyter-log
+(eval-when (:execute :load-toplevel)
+  (setf *log-enabled* t)
+  (setf *log-level* 2)
+  (let* ((log-file-name (make-pathname :name (format nil "cl-jupyter-~a" (getpid))
+                                       :type "log"))
+         (log-path-name (cond
+                          ((probe-file "/home/app/logs/")
+                           (merge-pathnames log-file-name #P"/home/app/logs/"))
+                          (t (merge-pathnames log-file-name #P"/tmp/")))))
+    (setf *log-file* (cl:open log-path-name
+                                :direction :output
+                                :if-exists :append
+                                :if-does-not-exist :create))
+    (format *log-file* "Log started up~%")
+    (setf *log-lock* (bordeaux-threads:make-lock "cl-jupyter-log"))
+    (format *log-file* "About to start logging cl-jupyter~%")
+    (defun always-log (fmt &rest args)
+      (let ((msg (apply #'format nil fmt args)))
+        (unwind-protect
+             (progn
+               (bordeaux-threads:acquire-lock *log-lock* t)
+               (princ msg *log-file*)
+               (finish-output *log-file*))
+          (bordeaux-threads:release-lock *log-lock*))))
+    (format *log-file* "===================== new run =======================~%")))
+
+#+cl-jupyter-log
 (defmacro logg (level fmt &rest args)
   "Log the passed ARGS using the format string FMT and its
  arguments ARGS."
@@ -68,10 +140,12 @@
           (< level *log-level*))
       (values);; disabled
       ;; when enabled
-      `(progn (format ,*log-out-stream* "[LOG]:")
-              (format ,*log-out-stream* ,fmt ,@args)
-              (format ,*log-out-stream* "~%"))))
-  
+      `(progn (always-log ,fmt ,@args))))
+
+#-cl-jupyter-log
+(defmacro logg (level fmt &rest args)
+  nil)
+
 (defmacro vbinds (binders expr &body body)
   "An abbreviation for MULTIPLE-VALUE-BIND."
   (labels ((replace-underscores (bs &optional (result nil) (fresh-vars nil) (replaced nil))
@@ -156,9 +230,9 @@
       #+scl (ext:quit code)                     ; XXX Pretty sure this *does*.
       #+(or openmcl mcl) (ccl::quit)
       #+abcl (cl-user::quit)
-      #+ecl (si:quit)
+      #+(or ecl clasp) (si:quit)
       ;; This group from <hebi...@math.uni.wroc.pl>
       #+poplog (poplog::bye)                    ; XXX Does this take an arg?
       #-(or allegro clisp cmu cormanlisp gcl lispworks lucid sbcl
-            kcl scl openmcl mcl abcl ecl)
+            kcl scl openmcl mcl abcl ecl clasp)
       (error 'not-implemented :proc (list 'quit code))) 

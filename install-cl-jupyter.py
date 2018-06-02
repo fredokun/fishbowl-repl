@@ -226,6 +226,15 @@ elif config.lisp_implementation == "ccl":
 
     print("... Kernel: using {}".format(ccl_version_string))
 
+elif config.lisp_implementation == "clasp":
+    if not config.lisp_executable:
+        config.lisp_executable = 'clasp'
+
+
+    import re
+
+    print("... Kernel: using {}".format("clasp"))
+
 elif config.lisp_implementation == "ecl":
     halt("Error: ECL not (yet) supported")
 elif config.lisp_implementation == "cmucl":
@@ -264,9 +273,21 @@ elif config.lisp_implementation == "ccl":
         "display_name": "CCL Lisp",
         "language": "lisp"
     }
+elif config.lisp_implementation == "clasp":
+    KERNEL_SPEC = {
+        "argv": [
+            config.lisp_executable, '--load', '/Users/meister/quicklisp/setup.lisp', '--load',
+            "{0}/cl-jupyter.lisp".format(config.cl_jupyter_startup_def_dir), "--",
+            "{0}/src".format(config.cl_jupyter_startup_def_dir),
+            config.cl_jupyter_startup_def_dir,
+            '{connection_file}'],
+        "display_name": "Clasp Lisp",
+        "language": "lisp"
+    }
 else:
     halt("Error: unsupported lisp implementation '{}'".format(lisp_implementation))
 
+print("kernel written to: %s" % (config.ipython_dir+"/kernels/lisp/kernel.json"))
 with open(config.ipython_dir + "/kernels/lisp/kernel.json", "w") as kernel_spec_file:
     json.dump(KERNEL_SPEC, kernel_spec_file)
 

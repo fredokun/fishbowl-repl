@@ -1,4 +1,3 @@
-
 (in-package #:cl-jupyter)
 
 #|
@@ -112,10 +111,12 @@ The deserialization of a message header from a JSon string is then trivial.
   ((header :initarg :header :accessor message-header)
    (parent-header :initarg :parent-header :initform nil :accessor message-parent-header)
    (metadata :initarg :metadata :initform nil :accessor message-metadata)
-   (content :initarg :content :initform nil :accessor message-content))
+   (content :initarg :content :initform nil :accessor message-content)
+   (buffers :type array :initarg :buffers :initform #() :accessor message-buffers))
   (:documentation "Representation of IPython messages"))
 
-(defun make-message (parent_msg msg_type metadata content) 
+(defun make-message (parent_msg msg_type metadata content &optional (buffers #()))
+  (check-type buffers array)
   (let ((hdr (message-header parent_msg)))
     (make-instance 
      'message
@@ -128,9 +129,11 @@ The deserialization of a message header from a JSon string is then trivial.
               :version (header-version hdr))
      :parent-header hdr
      :metadata metadata
-     :content content)))
+     :content content
+     :buffers buffers)))
 
-(defun make-orphan-message (session-id msg-type metadata content) 
+(defun make-orphan-message (session-id msg-type metadata content buffers)
+  (check-type buffers array)
   (make-instance 
    'message
    :header (make-instance 
@@ -142,7 +145,18 @@ The deserialization of a message header from a JSon string is then trivial.
             :version +KERNEL-PROTOCOL-VERSION+)
    :parent-header '()
    :metadata metadata
-   :content content))
+   :content content
+   :buffers buffers))
+
+(defun make-custom-message (&key content (buffers #()))
+  (check-type buffers array)
+  (make-instance
+   'message
+   :header nil
+   :parent-header nil
+   :metadata nil
+   :content content
+   :buffers buffers))
 
 (example-progn
  (defparameter *msg1* (make-instance 'message :header *header1*)))
@@ -160,13 +174,18 @@ The wire-serialization of IPython kernel messages uses multi-parts ZMQ messages.
   (apply #'concatenate (cons 'string (map 'list (lambda (x) (format nil "~(~2,'0X~)" x)) bytes))))
 
 (defun message-signing (key parts)
-  (let ((hmac (ironclad:make-hmac key :SHA256)))
-    ;; updates
-    (loop for part in parts
-       do (let ((part-bin (babel:string-to-octets part)))
-            (ironclad:update-hmac hmac part-bin)))
-    ;; digest
-    (octets-to-hex-string (ironclad:hmac-digest hmac))))
+  #+clasp(let* ((all-parts (with-output-to-string (sout)
+                             (loop for part in parts
+                                   do (princ part sout))))
+                (all-parts-octets (babel:string-to-octets all-parts)))
+           (core:hmac-sha256 all-parts-octets key))
+  #-clasp(let ((hmac (ironclad:make-hmac key :SHA256)))
+           ;; updates
+           (loop for part in parts
+                 do (let ((part-bin (babel:string-to-octets part)))
+                      (ironclad:update-hmac hmac part-bin)))
+           ;; digest
+           (octets-to-hex-string (ironclad:hmac-digest hmac))))
 
 (example
  (message-signing (babel:string-to-octets "toto") '("titi" "tata" "tutu" "tonton"))
@@ -176,7 +195,13 @@ The wire-serialization of IPython kernel messages uses multi-parts ZMQ messages.
 (defvar +WIRE-IDS-MSG-DELIMITER+ "<IDS|MSG>")
 
 (defmethod wire-serialize ((msg message) &key (identities nil) (key nil))
-  (with-slots (header parent-header metadata content) msg
+  (logg 2 "  in wire-serialize~%")
+  (with-slots (header parent-header metadata content buffers) msg
+    (logg 2 "header -> ~s~%" header)
+    (logg 2 "parent-header -> ~s~%" parent-header)
+    (logg 2 "metadata -> ~s~%" metadata)
+    (logg 2 "content -> ~s~%" content)
+    (logg 2 "Number of buffers  -> ~d~%" (length buffers))
     (let ((header-json (encode-json-to-string header))
           (parent-header-json (if parent-header
                                   (encode-json-to-string parent-header)
@@ -187,16 +212,19 @@ The wire-serialization of IPython kernel messages uses multi-parts ZMQ messages.
           (content-json (if content
                             (encode-json-to-string content)
                             "{}")))
+      (logg 2 "About to calculate signature~%")
       (let ((sig (if key
                      (message-signing key (list header-json parent-header-json metadata-json content-json))
                      "")))
+	(logg 2 "About to do append~%")
         (append identities
                 (list +WIRE-IDS-MSG-DELIMITER+
                       sig
                       header-json
                       parent-header-json
                       metadata-json
-                      content-json))))))
+                      content-json)
+                (coerce buffers 'list))))))
 
 (example-progn
  (defparameter *wire1* (wire-serialize *msg1* :identities '("XXX-YYY-ZZZ-TTT" "AAA-BBB-CCC-DDD"))))
@@ -232,28 +260,29 @@ The wire-deserialization part follows.
 
 
 (defun wire-deserialize (parts)
+  (logg 2 "  in wire-deserialize (length parts) -> ~d~%" (length parts))
   (let ((delim-index (position +WIRE-IDS-MSG-DELIMITER+ parts :test  #'equal)))
     (when (not delim-index)
       (error "no <IDS|MSG> delimiter found in message parts"))
     (let ((identities (subseq parts 0 delim-index))
           (signature (nth (1+ delim-index) parts)))
-      (let ((msg (destructuring-bind (header parent-header metadata content)
-                     (subseq parts (+ 2 delim-index) (+ 6 delim-index))
+      (let ((msg (destructuring-bind (header parent-header metadata content &rest buffers)
+                     (subseq parts (+ 2 delim-index) #+(or)(+ 6 delim-index)) ; the buffers are destructured
                    (make-instance 'message
                                   :header (wire-deserialize-header header)
                                   :parent-header (wire-deserialize-header parent-header)
                                   :metadata metadata
-                                  :content content))))
+                                  :content content
+                                  :buffers (coerce buffers 'vector)))))
         (values identities
                 signature
-                msg
-                (subseq parts (+ 6 delim-index)))))))
+                msg)))))
 
 
 (example-progn
- (defparameter *dewire-1* (multiple-value-bind (ids sig msg raw)
+ (defparameter *dewire-1* (multiple-value-bind (ids sig msg)
                               (wire-deserialize *wire1*)
-                            (list ids sig msg raw))))
+                            (list ids sig msg))))
 
 (example
  (header-username (message-header (third *dewire-1*)))
@@ -276,7 +305,11 @@ The wire-deserialization part follows.
 	   ;;DEBUG>>
 	   ;;(format t "~%[Send] wire parts: ~W~%" wire-parts)
 	   (dolist (part wire-parts)
-	     (pzmq:send socket part :sndmore t))
+             ;;; Clasp with cl-jupyter-widgets 
+             #+clasp(if (typep part 'clasp-ffi:foreign-data)
+                        (pzmq:send socket part :len (clasp-ffi:foreign-data-size part) :sndmore t)
+                        (pzmq:send socket part :sndmore t))
+	     #-clasp(pzmq:send socket part :sndmore t))
 	   (pzmq:send socket nil)))
     (bordeaux-threads:release-lock *message-send-lock*)))
 
@@ -310,7 +343,7 @@ The wire-deserialization part follows.
 	 (bordeaux-threads:acquire-lock *message-recv-lock*)
 	 (let ((parts (zmq-recv-list socket)))
 	   ;;DEBUG>>
-	   (format t "[Recv]: parts: ~A~%" (mapcar (lambda (part) (format nil "~W" part)) parts))
+	   ;;(format t "[Recv]: parts: ~A~%" (mapcar (lambda (part) (format nil "~W" part)) parts))
 	   (wire-deserialize parts)))
     (bordeaux-threads:release-lock *message-recv-lock*)))
 
