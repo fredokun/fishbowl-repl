@@ -84,8 +84,8 @@
    (signature-scheme :initarg :signature-scheme :reader config-signature-scheme :type string)
    (key :initarg :key :reader kernel-config-key)))
 
-(defun kernel-start ()
-  (let ((cmd-args (get-argv)))
+(defun kernel-start (&optional args)
+  (let ((cmd-args (or args (get-argv))))
     ;(princ (banner))
     (write-line "")
     (format t "~A: an enhanced interactive Common Lisp REPL~%" +KERNEL-IMPLEMENTATION-NAME+)
