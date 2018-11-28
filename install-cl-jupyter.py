@@ -229,6 +229,29 @@ elif config.lisp_implementation == "roswell":
             raise RequirementException(message)
 
     print("... Kernel: using {}".format(sbcl_version_string))
+elif config.lisp_implementation == "roswell-ccl":
+    if not config.lisp_executable:
+        config.lisp_executable = 'ros'
+
+    try:
+        ccl_version_string = subprocess.check_output([config.lisp_executable, "-L", "ccl-bin", "run", "--","-V"]).decode()
+    except FileNotFoundError:
+        halt("Error: Lisp executable '{0}' not in PATH".format (config.lisp_executable))
+    except subprocess.CalledProcessError as e:
+        halt("Error: {} from CCL".format(e))
+
+    import re
+    m = re.match(r".*[^0-9](([0-9]+\.)[0-9]+\.[0-9]+)", ccl_version_string)
+    if not m:
+        halt("Error: issue with ccl version string (please report)")
+
+    config.ccl_version = tuple([int(d) for d in m.group(1).split(".")])
+    #print("ccl version = {}".format(config.ccl_version))
+    if config.ccl_version[0] < 1 or config.ccl_version[1] < 10:
+        halt("Error: require CCL v1.10 or above")
+
+    print("... Kernel: using {}".format(ccl_version_string))
+
 elif config.lisp_implementation == "ccl":
     if not config.lisp_executable:
         config.lisp_executable = 'ccl'
@@ -290,6 +313,16 @@ elif config.lisp_implementation == "roswell":
             "{0}/cl-jupyter.lisp".format(config.cl_jupyter_startup_def_dir),
             '{connection_file}'],
         "display_name": "roswell",
+        "language": "lisp"
+    }
+elif config.lisp_implementation == "roswell-ccl":
+    KERNEL_SPEC = {
+        "argv": [
+            config.lisp_executable,
+            '-L', 'ccl-bin',
+            "{0}/cl-jupyter.lisp".format(config.cl_jupyter_startup_def_dir),
+            '{connection_file}'],
+        "display_name": "roswell-ccl",
         "language": "lisp"
     }
 elif config.lisp_implementation == "ccl":
