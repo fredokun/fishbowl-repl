@@ -202,8 +202,10 @@ if config.lisp_implementation == "sbcl":
 
 elif config.lisp_implementation == "ccl":
     if not config.lisp_executable:
-        config.lisp_executable = 'ccl'
-
+        if shutil.which("ccl64"):
+            config.lisp_executable = 'ccl64'
+        else:
+            config.lisp_executable = 'ccl'
     try:
         ccl_version_string = subprocess.check_output([config.lisp_executable, "-V"]).decode()
     except FileNotFoundError:
