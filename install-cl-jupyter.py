@@ -215,7 +215,7 @@ elif config.lisp_implementation == "ccl":
 
 
     import re
-    m = re.match(r".*([0-9]+\.[0-9]+)", ccl_version_string)
+    m = re.match(r".*?([0-9]+\.[0-9]+)", ccl_version_string)
     if not m:
         halt("Error: issue with ccl version string (please report)")
 
