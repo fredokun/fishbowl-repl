@@ -1,7 +1,11 @@
+
+
+
 ;; not yet installed in quicklisp directory
 (push (truename (format nil "~Asrc/" (directory-namestring *load-truename*)))
       asdf:*central-registry*)
 
+#-ros.init
 (let ((cmd-args
        ;; Borrowed from apply-argv, command-line-arguments.  Temporary solution (?)
        ;; This is not PvE's code.
@@ -47,5 +51,9 @@
 (in-package #:cl-jupyter-user)
 
 ;; start main loop
+#-ros.init
 (cl-jupyter:kernel-start)
 
+#+ros.init
+(defun main (&rest argv)
+  (cl-jupyter:kernel-start argv))
